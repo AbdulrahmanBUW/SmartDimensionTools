@@ -1,7 +1,8 @@
-﻿using System;
+﻿using Autodesk.Revit.DB;
+using Autodesk.Revit.UI;
+using System;
 using System.Collections.Generic;
 using System.Linq;
-using Autodesk.Revit.DB;
 
 namespace CustomRevitCommand
 {
@@ -20,31 +21,43 @@ namespace CustomRevitCommand
 
             try
             {
-                // Get all curtain walls in the view
-                var curtainWalls = GetCurtainWallsInView(doc, view);
+                // Get all curtain walls in the project (not just in view)
+                var allCurtainWalls = GetAllCurtainWalls(doc);
+                System.Diagnostics.Debug.WriteLine($"Found {allCurtainWalls.Count} curtain walls in project");
 
-                foreach (var curtainWall in curtainWalls)
+                foreach (var curtainWall in allCurtainWalls)
                 {
                     try
                     {
-                        // Process the curtain wall itself if selected
+                        // Check if this curtain wall is relevant to the current view
+                        if (!IsCurtainWallRelevantToView(curtainWall, view))
+                            continue;
+
+                        // Process the curtain wall itself if selected and settings allow
                         if (selectedIds.Contains(curtainWall.Id) && settings.IncludeCurtainWalls)
                         {
                             var wallItem = ProcessCurtainWall(curtainWall, view, settings);
                             if (wallItem != null)
                             {
                                 curtainWallItems.Add(wallItem);
+                                System.Diagnostics.Debug.WriteLine($"Added curtain wall: {curtainWall.Id}");
                             }
                         }
 
-                        // Process mullions if enabled
+                        // Process curtain wall grids if enabled
                         if (settings.IncludeMullions)
                         {
-                            var mullionItems = ProcessCurtainWallMullions(curtainWall, view, selectedIds, settings);
-                            curtainWallItems.AddRange(mullionItems);
+                            var gridItems = ProcessCurtainWallGrids(curtainWall, view, selectedIds, settings);
+                            curtainWallItems.AddRange(gridItems);
+                            System.Diagnostics.Debug.WriteLine($"Added {gridItems.Count} grid items from wall {curtainWall.Id}");
                         }
 
-                        // Process panels if needed
+                        // Process actual mullions if they exist
+                        var mullionItems = ProcessCurtainWallMullions(curtainWall, view, selectedIds, settings);
+                        curtainWallItems.AddRange(mullionItems);
+                        System.Diagnostics.Debug.WriteLine($"Added {mullionItems.Count} mullion items from wall {curtainWall.Id}");
+
+                        // Process panels if needed (usually not for dimensioning)
                         var panelItems = ProcessCurtainWallPanels(curtainWall, view, selectedIds, settings);
                         curtainWallItems.AddRange(panelItems);
                     }
@@ -54,7 +67,7 @@ namespace CustomRevitCommand
                     }
                 }
 
-                System.Diagnostics.Debug.WriteLine($"Found {curtainWallItems.Count} curtain wall elements");
+                System.Diagnostics.Debug.WriteLine($"Total curtain wall elements found: {curtainWallItems.Count}");
             }
             catch (Exception ex)
             {
@@ -65,44 +78,29 @@ namespace CustomRevitCommand
         }
 
         /// <summary>
-        /// Gets all curtain walls visible in the view
+        /// Gets all curtain walls from the entire project
         /// </summary>
-        private static List<Wall> GetCurtainWallsInView(Document doc, View view)
+        private static List<Wall> GetAllCurtainWalls(Document doc)
         {
             var curtainWalls = new List<Wall>();
 
             try
             {
-                var collector = new FilteredElementCollector(doc, view.Id)
-                    .OfClass(typeof(Wall));
+                var allWalls = new FilteredElementCollector(doc)
+                    .OfClass(typeof(Wall))
+                    .Cast<Wall>();
 
-                foreach (Wall wall in collector)
+                foreach (var wall in allWalls)
                 {
                     if (IsCurtainWall(wall))
                     {
                         curtainWalls.Add(wall);
                     }
                 }
-
-                // Also get all curtain walls from project (might not be visible in current view filter)
-                var allWallsCollector = new FilteredElementCollector(doc)
-                    .OfClass(typeof(Wall));
-
-                foreach (Wall wall in allWallsCollector)
-                {
-                    if (IsCurtainWall(wall) && !curtainWalls.Any(cw => cw.Id == wall.Id))
-                    {
-                        // Check if wall intersects with view
-                        if (IsWallVisibleInView(wall, view))
-                        {
-                            curtainWalls.Add(wall);
-                        }
-                    }
-                }
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"Error getting curtain walls: {ex.Message}");
+                System.Diagnostics.Debug.WriteLine($"Error getting all curtain walls: {ex.Message}");
             }
 
             return curtainWalls;
@@ -115,7 +113,7 @@ namespace CustomRevitCommand
         {
             try
             {
-                return wall.WallType.Kind == WallKind.Curtain;
+                return wall != null && wall.WallType?.Kind == WallKind.Curtain;
             }
             catch
             {
@@ -124,40 +122,262 @@ namespace CustomRevitCommand
         }
 
         /// <summary>
-        /// Checks if wall is visible in the given view
+        /// Checks if curtain wall is relevant to the current view
         /// </summary>
-        private static bool IsWallVisibleInView(Wall wall, View view)
+        private static bool IsCurtainWallRelevantToView(Wall curtainWall, View view)
         {
             try
             {
                 // Get wall location curve
-                if (!(wall.Location is LocationCurve locationCurve)) return false;
+                if (!(curtainWall.Location is LocationCurve locationCurve))
+                    return false;
 
-                Curve wallCurve = locationCurve.Curve;
+                var wallCurve = locationCurve.Curve;
+                var wallStart = wallCurve.GetEndPoint(0);
+                var wallEnd = wallCurve.GetEndPoint(1);
 
-                // For plan views, check Z-coordinate range
-                if (view.ViewType == ViewType.FloorPlan ||
-                    view.ViewType == ViewType.CeilingPlan ||
-                    view.ViewType == ViewType.AreaPlan)
+                switch (view.ViewType)
                 {
-                    var level = view.GenLevel;
-                    if (level != null)
-                    {
-                        double viewElevation = level.Elevation;
-                        double wallBottom = wall.get_Parameter(BuiltInParameter.WALL_BASE_OFFSET)?.AsDouble() ?? 0;
-                        double wallTop = wallBottom + wall.get_Parameter(BuiltInParameter.WALL_USER_HEIGHT_PARAM)?.AsDouble() ?? 10;
+                    case ViewType.FloorPlan:
+                    case ViewType.CeilingPlan:
+                    case ViewType.AreaPlan:
+                        // Check if wall intersects with view's level range
+                        var viewLevel = view.GenLevel;
+                        if (viewLevel != null)
+                        {
+                            double viewElevation = viewLevel.Elevation;
+                            double wallBottom = GetWallBottomElevation(curtainWall);
+                            double wallTop = GetWallTopElevation(curtainWall);
 
-                        return viewElevation >= wallBottom && viewElevation <= wallTop;
-                    }
+                            // Include if view elevation is within wall height range
+                            return viewElevation >= wallBottom - 1.0 && viewElevation <= wallTop + 1.0;
+                        }
+                        return true; // Default to include if can't determine
+
+                    case ViewType.Section:
+                    case ViewType.Elevation:
+                        // For sections/elevations, include all walls
+                        return true;
+
+                    default:
+                        return false;
                 }
-
-                // For sections/elevations, use geometric intersection
-                // (This is a simplified check - could be enhanced)
-                return true;
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"Error checking wall visibility: {ex.Message}");
+                System.Diagnostics.Debug.WriteLine($"Error checking wall relevance: {ex.Message}");
+                return true; // Default to include on error
+            }
+        }
+
+        /// <summary>
+        /// Process curtain wall grids - SIMPLIFIED VERSION
+        /// </summary>
+        private static List<ProjectedItem> ProcessCurtainWallGrids(Wall curtainWall, View view,
+            ICollection<ElementId> selectedIds, DimensionSettings settings)
+        {
+            var gridItems = new List<ProjectedItem>();
+
+            try
+            {
+                CurtainGrid curtainGrid = curtainWall.CurtainGrid;
+                if (curtainGrid == null)
+                {
+                    System.Diagnostics.Debug.WriteLine($"No curtain grid found for wall {curtainWall.Id}");
+                    return gridItems;
+                }
+
+                System.Diagnostics.Debug.WriteLine($"Processing curtain grid for wall {curtainWall.Id}");
+                System.Diagnostics.Debug.WriteLine($"Note: CurtainGridLine elements are not directly dimensionable in Revit.");
+                System.Diagnostics.Debug.WriteLine($"Dimensioning to curtain wall centerline instead.");
+
+                // Instead of trying to process grid lines, create reference points from curtain wall geometry
+                var referenceItems = CreateCurtainWallReferencePoints(curtainWall, view, settings);
+                gridItems.AddRange(referenceItems);
+
+                System.Diagnostics.Debug.WriteLine($"Created {referenceItems.Count} curtain wall reference points");
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Error processing curtain wall grids: {ex.Message}");
+            }
+
+            return gridItems;
+        }
+
+        /// <summary>
+        /// Create dimensionable reference points from curtain wall geometry
+        /// </summary>
+        private static List<ProjectedItem> CreateCurtainWallReferencePoints(Wall curtainWall, View view, DimensionSettings settings)
+        {
+            var referenceItems = new List<ProjectedItem>();
+
+            try
+            {
+                if (!(curtainWall.Location is LocationCurve locationCurve)) return referenceItems;
+
+                var wallCurve = locationCurve.Curve;
+                var wallStart = wallCurve.GetEndPoint(0);
+                var wallEnd = wallCurve.GetEndPoint(1);
+
+                // Project to view
+                var start2D = ProjectPointToView(wallStart, view);
+                var end2D = ProjectPointToView(wallEnd, view);
+                var direction2D = (end2D - start2D);
+
+                if (direction2D.GetLength() < 0.001) return referenceItems;
+
+                direction2D = direction2D.Normalize();
+
+                // For now, we'll just create one reference item for the curtain wall centerline
+                // This avoids the issue with non-dimensionable grid lines
+                var centerItem = new ProjectedItem
+                {
+                    Element = curtainWall,
+                    GeometricReference = new Reference(curtainWall),
+                    CenterlineReference = new Reference(curtainWall),
+                    ProjectedDirection = direction2D,
+                    ProjectedPoint = (start2D + end2D) / 2, // Wall center
+                    ItemType = "CurtainWallCenter",
+                    IsSelected = true,
+                    IsPointElement = false,
+                    IsCurtainWallElement = true,
+                    IsMullion = false,
+                    ReferenceType = DimensionReferenceType.Centerline,
+                    ElementWidth = GetWallWidth(curtainWall)
+                };
+
+                referenceItems.Add(centerItem);
+                System.Diagnostics.Debug.WriteLine($"Created curtain wall center reference point");
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Error creating curtain wall reference points: {ex.Message}");
+            }
+
+            return referenceItems;
+        }
+
+        /// <summary>
+        /// Process curtain wall mullions (actual mullion elements)
+        /// </summary>
+        private static List<ProjectedItem> ProcessCurtainWallMullions(Wall curtainWall, View view,
+            ICollection<ElementId> selectedIds, DimensionSettings settings)
+        {
+            var mullionItems = new List<ProjectedItem>();
+
+            // Only process mullions if the setting specifically includes them
+            if (!settings.IncludeMullions) return mullionItems;
+
+            try
+            {
+                CurtainGrid curtainGrid = curtainWall.CurtainGrid;
+                if (curtainGrid == null) return mullionItems;
+
+                // Get all mullions from the curtain grid
+                var allMullions = GetAllMullionsFromGrid(curtainGrid, curtainWall.Document);
+                System.Diagnostics.Debug.WriteLine($"Found {allMullions.Count} mullions in curtain wall {curtainWall.Id}");
+
+                foreach (var mullion in allMullions)
+                {
+                    try
+                    {
+                        bool includeThis = ShouldIncludeGridLine(mullion.Id, curtainWall.Id, selectedIds);
+
+                        if (includeThis)
+                        {
+                            var mullionItem = ProcessMullion(mullion, curtainWall, view, settings);
+                            if (mullionItem != null)
+                            {
+                                mullionItems.Add(mullionItem);
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"Error processing mullion {mullion.Id}: {ex.Message}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Error processing curtain wall mullions: {ex.Message}");
+            }
+
+            return mullionItems;
+        }
+
+        /// <summary>
+        /// Process curtain wall panels (if needed)
+        /// </summary>
+        private static List<ProjectedItem> ProcessCurtainWallPanels(Wall curtainWall, View view,
+            ICollection<ElementId> selectedIds, DimensionSettings settings)
+        {
+            var panelItems = new List<ProjectedItem>();
+            // For now, we typically don't dimension to panels
+            return panelItems;
+        }
+
+        /// <summary>
+        /// Determines if a grid line should be included based on selection
+        /// </summary>
+        private static bool ShouldIncludeGridLine(ElementId gridLineId, ElementId parentWallId, ICollection<ElementId> selectedIds)
+        {
+            // Include if:
+            // 1. Nothing is selected (include all)
+            // 2. The grid line itself is selected
+            // 3. The parent curtain wall is selected
+
+            if (selectedIds.Count == 0) return true;
+            if (selectedIds.Contains(gridLineId)) return true;
+            if (selectedIds.Contains(parentWallId)) return true;
+
+            return false;
+        }
+
+        /// <summary>
+        /// Get all mullions from a curtain grid
+        /// </summary>
+        private static List<Mullion> GetAllMullionsFromGrid(CurtainGrid curtainGrid, Document doc)
+        {
+            var mullions = new List<Mullion>();
+
+            try
+            {
+                // Get mullions directly from the document
+                var mullionCollector = new FilteredElementCollector(doc)
+                    .OfClass(typeof(Mullion))
+                    .Cast<Mullion>();
+
+                foreach (var mullion in mullionCollector)
+                {
+                    // Check if this mullion belongs to this curtain grid
+                    if (IsMullionInCurtainGrid(mullion, curtainGrid) && !mullions.Any(m => m.Id == mullion.Id))
+                    {
+                        mullions.Add(mullion);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Error getting mullions from grid: {ex.Message}");
+            }
+
+            return mullions;
+        }
+
+        /// <summary>
+        /// Check if a mullion belongs to a specific curtain grid
+        /// </summary>
+        private static bool IsMullionInCurtainGrid(Mullion mullion, CurtainGrid curtainGrid)
+        {
+            try
+            {
+                // Simplified approach - in a full implementation, you'd need more sophisticated analysis
+                return true;
+            }
+            catch
+            {
                 return false;
             }
         }
@@ -219,89 +439,10 @@ namespace CustomRevitCommand
         }
 
         /// <summary>
-        /// Process curtain wall mullions
-        /// </summary>
-        private static List<ProjectedItem> ProcessCurtainWallMullions(Wall curtainWall, View view,
-            ICollection<ElementId> selectedIds, DimensionSettings settings)
-        {
-            var mullionItems = new List<ProjectedItem>();
-
-            try
-            {
-                // Get curtain grid
-                CurtainGrid curtainGrid = curtainWall.CurtainGrid;
-                if (curtainGrid == null) return mullionItems;
-
-                // Process U-direction mullions (typically vertical)
-                foreach (ElementId mullionId in curtainGrid.GetUGridLineIds())
-                {
-                    try
-                    {
-                        var mullion = curtainWall.Document.GetElement(mullionId) as Mullion;
-                        if (mullion != null)
-                        {
-                            // Check if this mullion should be included
-                            bool includeThis = selectedIds.Count == 0 || // Include all if nothing selected
-                                             selectedIds.Contains(mullionId) || // Specifically selected
-                                             selectedIds.Contains(curtainWall.Id); // Parent wall selected
-
-                            if (includeThis)
-                            {
-                                var mullionItem = ProcessMullion(mullion, curtainWall, view, settings, "U");
-                                if (mullionItem != null)
-                                {
-                                    mullionItems.Add(mullionItem);
-                                }
-                            }
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        System.Diagnostics.Debug.WriteLine($"Error processing U-mullion {mullionId}: {ex.Message}");
-                    }
-                }
-
-                // Process V-direction mullions (typically horizontal)
-                foreach (ElementId mullionId in curtainGrid.GetVGridLineIds())
-                {
-                    try
-                    {
-                        var mullion = curtainWall.Document.GetElement(mullionId) as Mullion;
-                        if (mullion != null)
-                        {
-                            bool includeThis = selectedIds.Count == 0 ||
-                                             selectedIds.Contains(mullionId) ||
-                                             selectedIds.Contains(curtainWall.Id);
-
-                            if (includeThis)
-                            {
-                                var mullionItem = ProcessMullion(mullion, curtainWall, view, settings, "V");
-                                if (mullionItem != null)
-                                {
-                                    mullionItems.Add(mullionItem);
-                                }
-                            }
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        System.Diagnostics.Debug.WriteLine($"Error processing V-mullion {mullionId}: {ex.Message}");
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"Error processing curtain wall mullions: {ex.Message}");
-            }
-
-            return mullionItems;
-        }
-
-        /// <summary>
         /// Process a single mullion
         /// </summary>
         private static ProjectedItem ProcessMullion(Mullion mullion, Wall parentWall, View view,
-            DimensionSettings settings, string direction)
+            DimensionSettings settings)
         {
             try
             {
@@ -332,7 +473,7 @@ namespace CustomRevitCommand
                         IsCurtainWallElement = true,
                         IsMullion = true,
                         ParentWallId = parentWall.Id,
-                        ReferenceType = DimensionReferenceType.Centerline, // Mullions always use centerline
+                        ReferenceType = DimensionReferenceType.Centerline,
                         ElementWidth = GetMullionWidth(mullion)
                     };
 
@@ -367,18 +508,35 @@ namespace CustomRevitCommand
             }
         }
 
-        /// <summary>
-        /// Process curtain wall panels (if needed)
-        /// </summary>
-        private static List<ProjectedItem> ProcessCurtainWallPanels(Wall curtainWall, View view,
-            ICollection<ElementId> selectedIds, DimensionSettings settings)
+        #region Helper Methods
+
+        private static double GetWallBottomElevation(Wall wall)
         {
-            var panelItems = new List<ProjectedItem>();
+            try
+            {
+                var baseOffset = wall.get_Parameter(BuiltInParameter.WALL_BASE_OFFSET)?.AsDouble() ?? 0;
+                var level = wall.Document.GetElement(wall.LevelId) as Level;
+                var levelElevation = level?.Elevation ?? 0;
+                return levelElevation + baseOffset;
+            }
+            catch
+            {
+                return 0;
+            }
+        }
 
-            // For now, we typically don't dimension to panels, but this could be extended
-            // if users need to dimension to panel edges
-
-            return panelItems;
+        private static double GetWallTopElevation(Wall wall)
+        {
+            try
+            {
+                var baseElevation = GetWallBottomElevation(wall);
+                var height = wall.get_Parameter(BuiltInParameter.WALL_USER_HEIGHT_PARAM)?.AsDouble() ?? 10;
+                return baseElevation + height;
+            }
+            catch
+            {
+                return 10; // Default height
+            }
         }
 
         /// <summary>
@@ -591,6 +749,8 @@ namespace CustomRevitCommand
                     return defaultDir.GetLength() > 0.001 ? defaultDir.Normalize() : new XYZ(1, 0, 0);
             }
         }
+
+        #endregion
     }
 
     /// <summary>

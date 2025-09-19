@@ -1,4 +1,5 @@
 ﻿using System;
+using System.IO;
 using System.Collections.Generic;
 using System.Linq;
 using Autodesk.Revit.Attributes;
@@ -7,6 +8,8 @@ using Autodesk.Revit.UI;
 
 // Alias to resolve namespace conflicts
 using RevitGrid = Autodesk.Revit.DB.Grid;
+
+
 
 namespace CustomRevitCommand
 {
@@ -19,6 +22,7 @@ namespace CustomRevitCommand
         private double PARALLEL_TOLERANCE => 0.05; // ~3 degrees for 2D
         private double PERPENDICULAR_TOLERANCE => _settings?.PerpendicularTolerance ?? 0.1;
         private double DIMENSION_OFFSET => _settings?.DefaultOffset ?? 1.64; // feet
+        private string _logFilePath;
 
         public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
         {
@@ -70,6 +74,28 @@ namespace CustomRevitCommand
                 return Result.Failed;
             }
         }
+
+        private void LogToFile(string message)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(_logFilePath))
+                {
+                    string tempPath = Path.GetTempPath();
+                    _logFilePath = Path.Combine(tempPath, $"RevitAutoDimension_Debug_{DateTime.Now:yyyyMMdd_HHmmss}.txt");
+                    File.WriteAllText(_logFilePath, $"Auto-Dimension Debug Log - {DateTime.Now:yyyy-MM-dd HH:mm:ss}\n");
+                    File.AppendAllText(_logFilePath, "=".PadRight(80, '=') + "\n\n");
+                }
+
+                File.AppendAllText(_logFilePath, $"[{DateTime.Now:HH:mm:ss.fff}] {message}\n");
+            }
+            catch (Exception ex)
+            {
+                // Fallback - show in task dialog if file writing fails
+                TaskDialog.Show("Debug Log Error", $"Could not write to log file: {ex.Message}\nOriginal message: {message}");
+            }
+        }
+
 
         /// <summary>
         /// Show settings dialog if needed (e.g., if Ctrl key is held)
@@ -244,51 +270,181 @@ namespace CustomRevitCommand
         {
             try
             {
+                LogToFile($"=== PROCESSING VIEW: {view.Name} (Type: {view.ViewType}) ===");
+                LogToFile($"Selected elements count: {selectedIds.Count}");
+
+                // Log selected element IDs
+                foreach (var id in selectedIds)
+                {
+                    var element = doc.GetElement(id);
+                    LogToFile($"  Selected: {element?.Category?.Name} - {element?.Name} (ID: {id.IntegerValue})");
+                }
+
                 // STEP 1: Collect all items (elements, grids, levels, curtain walls)
                 List<ProjectedItem> projectedItems = CollectAllItems(doc, view, selectedIds);
 
                 if (projectedItems.Count == 0)
                 {
-                    System.Diagnostics.Debug.WriteLine($"No valid items found in view: {view.Name}");
+                    LogToFile($"❌ No valid items found in view: {view.Name}");
+                    LogToFile($"DIAGNOSIS: This is likely the main issue - no items are being collected");
+
+                    // Show user the log file location
+                    TaskDialog.Show("Debug - No Items Found",
+                        $"No dimension items were collected.\n\n" +
+                        $"Debug log saved to your Desktop:\n{Path.GetFileName(_logFilePath)}\n\n" +
+                        $"Check the log file for detailed analysis.");
                     return 0;
                 }
 
-                System.Diagnostics.Debug.WriteLine($"Found {projectedItems.Count} items in view {view.Name}");
+                LogToFile($"✅ Found {projectedItems.Count} items in view {view.Name}");
+
+                // Log each projected item
+                for (int i = 0; i < projectedItems.Count; i++)
+                {
+                    var item = projectedItems[i];
+                    LogToFile($"  Item {i + 1}: {item.ItemType} - {item.Element?.Name ?? "Unnamed"} " +
+                        $"(ID: {item.Element?.Id?.IntegerValue}) - Selected: {item.IsSelected}, IsPoint: {item.IsPointElement}");
+
+                    if (!item.IsPointElement && item.ProjectedDirection != null)
+                    {
+                        LogToFile($"    Direction: ({item.ProjectedDirection.X:F3}, {item.ProjectedDirection.Y:F3}, {item.ProjectedDirection.Z:F3})");
+                    }
+
+                    if (item.ProjectedPoint != null)
+                    {
+                        LogToFile($"    Point: ({item.ProjectedPoint.X:F3}, {item.ProjectedPoint.Y:F3}, {item.ProjectedPoint.Z:F3})");
+                    }
+                }
 
                 // STEP 2: Group by parallel directions with enhanced logic
+                LogToFile($"\n--- GROUPING BY PARALLEL DIRECTIONS ---");
                 var parallelGroups = GroupByParallelDirections(projectedItems);
 
+                LogToFile($"Created {parallelGroups.Count} parallel groups:");
+                foreach (var group in parallelGroups)
+                {
+                    var direction = group.Key;
+                    var items = group.Value;
+                    LogToFile($"  Group direction ({direction.X:F3}, {direction.Y:F3}, {direction.Z:F3}): {items.Count} items");
+
+                    foreach (var item in items)
+                    {
+                        LogToFile($"    - {item.ItemType}: {item.Element?.Name ?? "Unnamed"} (Selected: {item.IsSelected})");
+                    }
+                }
+
                 // STEP 3: Create combined dimension groups with semantic grouping
+                LogToFile($"\n--- CREATING DIMENSION GROUPS ---");
                 var dimensionGroups = CreateCombinedDimensionGroups(parallelGroups);
 
+                LogToFile($"Created {dimensionGroups.Count} dimension groups:");
+                foreach (var group in dimensionGroups)
+                {
+                    var direction = group.Key;
+                    var items = group.Value;
+                    LogToFile($"  Dimension group direction ({direction.X:F3}, {direction.Y:F3}, {direction.Z:F3}): {items.Count} items");
+
+                    foreach (var item in items)
+                    {
+                        LogToFile($"    - {item.ItemType}: {item.Element?.Name ?? "Unnamed"} " +
+                            $"(Pos: {item.PositionAlongDirection:F3})");
+                    }
+                }
+
+                if (dimensionGroups.Count == 0)
+                {
+                    LogToFile($"❌ No dimension groups created - this means no valid groupings were found");
+                    LogToFile($"DIAGNOSIS: Items were collected but couldn't be grouped for dimensioning");
+
+                    TaskDialog.Show("Debug - No Groups",
+                        $"Items were found but no dimension groups could be created.\n\n" +
+                        $"Debug log saved to your Desktop:\n{Path.GetFileName(_logFilePath)}\n\n" +
+                        $"Check the log file to see why grouping failed.");
+                    return 0;
+                }
+
                 // STEP 4: Create dimension chains with proper reference types
+                LogToFile($"\n--- CREATING DIMENSION CHAINS ---");
                 int chainsCreated = 0;
                 List<Dimension> createdDimensions = new List<Dimension>();
 
                 foreach (var group in dimensionGroups)
                 {
+                    LogToFile($"Processing group with {group.Value.Count} items...");
+
                     if (group.Value.Count >= 2)
                     {
-                        Dimension newDimension = CreateDimensionChain(doc, view, group.Key, group.Value);
-                        if (newDimension != null)
+                        LogToFile($"  ✅ Sufficient items ({group.Value.Count}) for dimension chain");
+
+                        try
                         {
-                            chainsCreated++;
-                            createdDimensions.Add(newDimension);
+                            Dimension newDimension = CreateDimensionChain(doc, view, group.Key, group.Value);
+                            if (newDimension != null)
+                            {
+                                chainsCreated++;
+                                createdDimensions.Add(newDimension);
+                                LogToFile($"  ✅ Dimension chain created successfully! (Chain #{chainsCreated})");
+                            }
+                            else
+                            {
+                                LogToFile($"  ❌ CreateDimensionChain returned null");
+                            }
                         }
+                        catch (Exception ex)
+                        {
+                            LogToFile($"  ❌ Error creating dimension chain: {ex.Message}");
+                            LogToFile($"     Stack trace: {ex.StackTrace}");
+                        }
+                    }
+                    else
+                    {
+                        LogToFile($"  ❌ Insufficient items ({group.Value.Count}) for dimension chain (need at least 2)");
                     }
                 }
 
                 // STEP 5: Move dimensions for better placement
                 if (createdDimensions.Count > 0)
                 {
-                    MoveDimensionsLeft(doc, createdDimensions, 0.0328084); // 10mm in feet
+                    LogToFile($"\n--- MOVING DIMENSIONS ---");
+                    try
+                    {
+                        MoveDimensionsLeft(doc, createdDimensions, 0.0328084); // 10mm in feet
+                        LogToFile($"✅ Moved {createdDimensions.Count} dimensions");
+                    }
+                    catch (Exception ex)
+                    {
+                        LogToFile($"❌ Error moving dimensions: {ex.Message}");
+                    }
+                }
+
+                LogToFile($"\n=== PROCESSING COMPLETE: {chainsCreated} chains created ===");
+
+                // Show final result to user
+                if (chainsCreated == 0)
+                {
+                    TaskDialog.Show("Debug - No Dimensions Created",
+                        $"No dimension chains were created.\n\n" +
+                        $"Items found: {projectedItems.Count}\n" +
+                        $"Groups created: {dimensionGroups.Count}\n\n" +
+                        $"Full debug log saved to your Desktop:\n{Path.GetFileName(_logFilePath)}");
+                }
+                else
+                {
+                    TaskDialog.Show("Debug - Success!",
+                        $"Created {chainsCreated} dimension chains!\n\n" +
+                        $"Debug log saved to your Desktop:\n{Path.GetFileName(_logFilePath)}");
                 }
 
                 return chainsCreated;
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"Error processing view {view.Name}: {ex.Message}");
+                LogToFile($"❌ Error processing view {view.Name}: {ex.Message}");
+                LogToFile($"Stack trace: {ex.StackTrace}");
+
+                TaskDialog.Show("Debug - Fatal Error",
+                    $"Fatal error in processing:\n{ex.Message}\n\n" +
+                    $"Debug log saved to your Desktop:\n{Path.GetFileName(_logFilePath)}");
                 return 0;
             }
         }
@@ -296,6 +452,7 @@ namespace CustomRevitCommand
         /// <summary>
         /// Show a summary of results to the user
         /// </summary>
+        // REPLACE your ShowResultsSummary method in AutoDimensionCommand.cs with this version:
         private void ShowResultsSummary(int totalChains, List<string> processedViews, List<string> failedViews)
         {
             string summary = $"Auto-Dimension Results:\n\n";
@@ -326,6 +483,17 @@ namespace CustomRevitCommand
             summary += $"• Include Curtain Walls: {(_settings.IncludeCurtainWalls ? "Yes" : "No")}\n";
             summary += $"• Include Mullions: {(_settings.IncludeMullions ? "Yes" : "No")}\n";
 
+            // ADD CURTAIN WALL GRID LINE LIMITATION NOTICE:
+            if (_settings.IncludeMullions)
+            {
+                summary += $"\nNote: Curtain Wall Grid Lines are not directly dimensionable in Revit.\n";
+                summary += $"The tool dimensions to curtain walls and mullions instead.\n";
+                summary += $"For precise curtain wall layout dimensions, consider:\n";
+                summary += $"• Using the manual Dimension Chain tool\n";
+                summary += $"• Dimensioning to actual mullion elements\n";
+                summary += $"• Creating reference lines for custom dimensioning\n";
+            }
+
             TaskDialog resultDialog = new TaskDialog("Auto-Dimension Results");
             resultDialog.MainContent = summary;
             resultDialog.CommonButtons = TaskDialogCommonButtons.Ok;
@@ -349,44 +517,130 @@ namespace CustomRevitCommand
 
             try
             {
+                LogToFile($"\n--- COLLECTING ITEMS FROM VIEW: {view.Name} ---");
+                LogToFile($"View type: {view.ViewType}");
+                LogToFile($"Selected IDs count: {selectedIds.Count}");
+
                 // Get visible elements in view
                 FilteredElementCollector collector = new FilteredElementCollector(doc, view.Id);
+                var allViewElements = collector.ToElements().ToList();
+                LogToFile($"Total elements in view: {allViewElements.Count}");
 
-                foreach (Element element in collector.ToElements())
+                int processedCount = 0;
+                int skippedCount = 0;
+
+                foreach (Element element in allViewElements)
                 {
                     ProjectedItem projectedItem = null;
+                    string skipReason = "";
 
-                    if (element is RevitGrid grid && _settings.IncludeGrids)
+                    try
                     {
-                        projectedItem = ProcessGrid(grid, view);
-                    }
-                    else if (element is Level level && (view.ViewType == ViewType.Section || view.ViewType == ViewType.Elevation) && _settings.IncludeLevels)
-                    {
-                        projectedItem = ProcessLevel(level, view);
-                    }
-                    else if (HasCenterline(element) && selectedIds.Contains(element.Id))
-                    {
-                        // First try to process as regular linear element
-                        projectedItem = ProcessElement(element, view);
-
-                        // If it fails as linear element, try as perpendicular element
-                        if (projectedItem == null)
+                        if (element is RevitGrid grid && _settings.IncludeGrids)
                         {
-                            projectedItem = ProcessPerpendicularElement(element, view);
+                            LogToFile($"Processing grid: {grid.Name}");
+                            projectedItem = ProcessGrid(grid, view);
+                            if (projectedItem != null)
+                            {
+                                LogToFile($"  ✅ Grid processed successfully");
+                            }
+                            else
+                            {
+                                LogToFile($"  ❌ Grid processing failed");
+                            }
+                        }
+                        else if (element is Level level && (view.ViewType == ViewType.Section || view.ViewType == ViewType.Elevation) && _settings.IncludeLevels)
+                        {
+                            LogToFile($"Processing level: {level.Name}");
+                            projectedItem = ProcessLevel(level, view);
+                            if (projectedItem != null)
+                            {
+                                LogToFile($"  ✅ Level processed successfully");
+                            }
+                            else
+                            {
+                                LogToFile($"  ❌ Level processing failed");
+                            }
+                        }
+                        else if (HasCenterline(element))
+                        {
+                            bool isSelected = selectedIds.Contains(element.Id);
+                            LogToFile($"Processing element: {element.Category?.Name} - {element.Name} (ID: {element.Id.IntegerValue}, Selected: {isSelected})");
+
+                            if (isSelected)
+                            {
+                                // First try to process as regular linear element
+                                projectedItem = ProcessElement(element, view);
+
+                                if (projectedItem != null)
+                                {
+                                    LogToFile($"  ✅ Element processed as linear element");
+                                }
+                                else
+                                {
+                                    // If it fails as linear element, try as perpendicular element
+                                    LogToFile($"  ⚠️ Linear processing failed, trying perpendicular...");
+                                    projectedItem = ProcessPerpendicularElement(element, view);
+                                    if (projectedItem != null)
+                                    {
+                                        LogToFile($"  ✅ Element processed as perpendicular element");
+                                    }
+                                    else
+                                    {
+                                        LogToFile($"  ❌ Both linear and perpendicular processing failed");
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                skipReason = "Not selected";
+                            }
+                        }
+                        else
+                        {
+                            skipReason = "No centerline or not included in settings";
+                        }
+
+                        if (projectedItem != null)
+                        {
+                            projectedItems.Add(projectedItem);
+                            processedCount++;
+                        }
+                        else if (!string.IsNullOrEmpty(skipReason))
+                        {
+                            skippedCount++;
+                            // Only log first few skipped items to avoid spam
+                            if (skippedCount <= 5)
+                            {
+                                LogToFile($"Skipped: {element.Category?.Name} - {skipReason}");
+                            }
                         }
                     }
-
-                    if (projectedItem != null)
+                    catch (Exception ex)
                     {
-                        projectedItems.Add(projectedItem);
+                        LogToFile($"❌ Error processing element {element.Id}: {ex.Message}");
                     }
                 }
 
-                // Process curtain walls and their components
+                LogToFile($"View elements: Processed {processedCount}, Skipped {skippedCount}");
+
+                // ENHANCED: Process curtain walls and their components with comprehensive grid support
                 if (_settings.IncludeCurtainWalls || _settings.IncludeMullions)
                 {
+                    LogToFile($"\n--- PROCESSING CURTAIN WALL ELEMENTS ---");
+                    LogToFile($"Include Curtain Walls: {_settings.IncludeCurtainWalls}");
+                    LogToFile($"Include Mullions: {_settings.IncludeMullions}");
+
                     var curtainWallItems = CurtainWallHelper.ProcessCurtainWallElements(doc, view, selectedIds, _settings);
                     projectedItems.AddRange(curtainWallItems);
+                    LogToFile($"✅ Added {curtainWallItems.Count} curtain wall elements");
+
+                    // Log curtain wall items
+                    foreach (var cwItem in curtainWallItems)
+                    {
+                        LogToFile($"  CW Item: {cwItem.ItemType} - {cwItem.Element?.Name ?? "Unnamed"} " +
+                            $"(ID: {cwItem.Element?.Id?.IntegerValue}, Selected: {cwItem.IsSelected})");
+                    }
                 }
 
                 // For layouts, also get ALL grids from project (not just visible ones)
@@ -394,30 +648,81 @@ namespace CustomRevitCommand
                 {
                     if (_settings.IncludeGrids)
                     {
+                        LogToFile($"\n--- PROCESSING ALL PROJECT GRIDS ---");
                         FilteredElementCollector allGrids = new FilteredElementCollector(doc).OfClass(typeof(RevitGrid));
+                        var allGridsList = allGrids.ToElements().Cast<RevitGrid>().ToList();
+                        LogToFile($"Found {allGridsList.Count} total grids in project");
 
-                        foreach (RevitGrid grid in allGrids.ToElements().Cast<RevitGrid>())
+                        int addedGrids = 0;
+                        foreach (RevitGrid grid in allGridsList)
                         {
                             // Skip if already processed
-                            if (projectedItems.Any(p => p.Element.Id == grid.Id)) continue;
+                            if (projectedItems.Any(p => p.Element.Id == grid.Id))
+                            {
+                                LogToFile($"Skipping already processed grid: {grid.Name}");
+                                continue;
+                            }
 
                             ProjectedItem projectedGrid = ProcessGrid(grid, view);
                             if (projectedGrid != null)
                             {
                                 projectedItems.Add(projectedGrid);
+                                addedGrids++;
+                                LogToFile($"Added project grid: {grid.Name}");
                             }
                         }
+                        LogToFile($"Added {addedGrids} additional grids from project");
                     }
                 }
 
-                System.Diagnostics.Debug.WriteLine($"Collected {projectedItems.Count} items for view {view.Name}");
+                LogToFile($"\n--- COLLECTION SUMMARY ---");
+                LogToFile($"Total items collected: {projectedItems.Count}");
+
+                // Summary by type
+                var itemsByType = projectedItems.GroupBy(p => p.ItemType).ToDictionary(g => g.Key, g => g.Count());
+                foreach (var kvp in itemsByType)
+                {
+                    LogToFile($"  {kvp.Key}: {kvp.Value}");
+                }
+
+                var curtainWallCount = projectedItems.Count(p => p.IsCurtainWallElement);
+                var gridLineCount = projectedItems.Count(p => p.ItemType == "CurtainGridLine");
+                var mullionCount = projectedItems.Count(p => p.ItemType == "Mullion");
+                var selectedCount = projectedItems.Count(p => p.IsSelected);
+
+                LogToFile($"  - Curtain wall elements: {curtainWallCount}");
+                LogToFile($"  - Curtain grid lines: {gridLineCount}");
+                LogToFile($"  - Mullions: {mullionCount}");
+                LogToFile($"  - Selected items: {selectedCount}");
+
+                LogToFile($"--- END COLLECTION ---\n");
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"Error collecting items: {ex.Message}");
+                LogToFile($"❌ Error collecting items: {ex.Message}");
+                LogToFile($"Stack trace: {ex.StackTrace}");
             }
 
             return projectedItems;
+        }
+
+        private bool IsValidProjectedItem(ProjectedItem item)
+        {
+            if (item == null) return false;
+            if (item.Element == null) return false;
+            if (item.ProjectedPoint == null) return false;
+            if (!item.IsPointElement && (item.ProjectedDirection == null || item.ProjectedDirection.GetLength() < 0.001)) return false;
+            return true;
+        }
+
+        private string GetInvalidReason(ProjectedItem item)
+        {
+            if (item == null) return "Item is null";
+            if (item.Element == null) return "Element is null";
+            if (item.ProjectedPoint == null) return "ProjectedPoint is null";
+            if (!item.IsPointElement && (item.ProjectedDirection == null || item.ProjectedDirection.GetLength() < 0.001))
+                return "ProjectedDirection is null or too short for linear element";
+            return "Unknown";
         }
 
         // Process elements that are perpendicular to the view surface - ENHANCED
@@ -845,10 +1150,22 @@ namespace CustomRevitCommand
             if (element == null || element.Category == null) return false;
             if (element is RevitGrid || element is Level) return false;
 
-            // Include curtain wall elements if settings allow
+            // Handle curtain wall elements
             if (CurtainWallHelper.IsCurtainWall(element as Wall))
             {
                 return _settings.IncludeCurtainWalls;
+            }
+
+            // Handle curtain wall grid lines
+            if (element is CurtainGridLine)
+            {
+                return _settings.IncludeMullions; // Curtain grid lines are controlled by mullion setting
+            }
+
+            // Handle mullions
+            if (element is Mullion)
+            {
+                return _settings.IncludeMullions;
             }
 
             // Exclude fittings, accessories based on settings
@@ -972,7 +1289,8 @@ namespace CustomRevitCommand
                 // Check if we have any selected elements in this parallel group
                 var selectedElements = allParallelItems.Where(i =>
                     (i.ItemType == "Element" || i.ItemType == "PerpendicularElement" ||
-                     i.ItemType == "CurtainWall" || i.ItemType == "Mullion") && i.IsSelected).ToList();
+                     i.ItemType == "CurtainWall" || i.ItemType == "Mullion" ||
+                     i.ItemType == "CurtainGridLine") && i.IsSelected).ToList();
 
                 if (selectedElements.Count == 0) continue;
 
@@ -991,6 +1309,11 @@ namespace CustomRevitCommand
                 if (representatives.Count >= 2)
                 {
                     representatives.Sort((a, b) => a.PositionAlongDirection.CompareTo(b.PositionAlongDirection));
+
+                    // ADD THIS DEBUG CALL before adding to dimension groups:
+                    LogToFile($"\nDebugging representatives for direction ({direction.X:F3}, {direction.Y:F3}, {direction.Z:F3}):");
+                    DebugProjectedItemReferences(representatives);
+
                     dimensionGroups[direction] = representatives;
                 }
             }
@@ -1048,26 +1371,59 @@ namespace CustomRevitCommand
         {
             if (group.Count == 1) return group[0];
 
-            // Enhanced priority: Selected Elements > Grids > Levels > Curtain Wall Elements > Other Elements
+            // Enhanced priority: 
+            // 1. Selected Elements (linear first)
+            // 2. Curtain Wall Grid Lines (most precise)
+            // 3. Grids 
+            // 4. Levels 
+            // 5. Curtain Wall Elements 
+            // 6. Other Elements
+
             var selectedElements = group.Where(i =>
                 (i.ItemType == "Element" || i.ItemType == "PerpendicularElement" ||
-                 i.ItemType == "CurtainWall" || i.ItemType == "Mullion") && i.IsSelected).ToList();
+                 i.ItemType == "CurtainWall" || i.ItemType == "Mullion" || i.ItemType == "CurtainGridLine")
+                && i.IsSelected).ToList();
 
             if (selectedElements.Count > 0)
             {
+                // Among selected elements, prefer curtain grid lines for their precision
+                var curtainGridLines = selectedElements.Where(i => i.ItemType == "CurtainGridLine").ToList();
+                if (curtainGridLines.Count > 0)
+                {
+                    // Prefer linear grid lines over point grid lines
+                    var linearGridLines = curtainGridLines.Where(i => !i.IsPointElement).ToList();
+                    if (linearGridLines.Count > 0)
+                    {
+                        return linearGridLines.First();
+                    }
+                    return curtainGridLines.First();
+                }
+
                 // Prefer linear selected elements over point elements
                 var linearSelected = selectedElements.Where(i => !i.IsPointElement).ToList();
                 if (linearSelected.Count > 0)
                 {
                     // Among linear elements, prefer curtain walls and mullions for their precision
-                    var curtainWallElements = linearSelected.Where(i => i.IsCurtainWallElement).ToList();
-                    if (curtainWallElements.Count > 0)
+                    var selectedCurtainElements = linearSelected.Where(i => i.IsCurtainWallElement).ToList();
+                    if (selectedCurtainElements.Count > 0)
                     {
-                        return curtainWallElements.First();
+                        return selectedCurtainElements.First();
                     }
                     return linearSelected.First();
                 }
                 return selectedElements.First();
+            }
+
+            // If no selected elements, check for curtain grid lines (they're very precise)
+            var nonSelectedGridLines = group.Where(i => i.ItemType == "CurtainGridLine").ToList();
+            if (nonSelectedGridLines.Count > 0)
+            {
+                var linearNonSelectedGridLines = nonSelectedGridLines.Where(i => !i.IsPointElement).ToList();
+                if (linearNonSelectedGridLines.Count > 0)
+                {
+                    return linearNonSelectedGridLines.First();
+                }
+                return nonSelectedGridLines.First();
             }
 
             var grids = group.Where(i => i.ItemType == "Grid").ToList();
@@ -1084,6 +1440,12 @@ namespace CustomRevitCommand
                 return namedLevel ?? levels.First();
             }
 
+            var nonSelectedCurtainElements = group.Where(i => i.IsCurtainWallElement).ToList();
+            if (nonSelectedCurtainElements.Count > 0)
+            {
+                return nonSelectedCurtainElements.First();
+            }
+
             var linearElements = group.Where(i => !i.IsPointElement).ToList();
             if (linearElements.Count > 0)
             {
@@ -1094,17 +1456,60 @@ namespace CustomRevitCommand
         }
 
         // STEP 4: Create dimension chain with proper reference types
+        // REPLACE your CreateDimensionChain method with this debug version:
         private Dimension CreateDimensionChain(Document doc, View view, XYZ direction, List<ProjectedItem> items)
         {
             try
             {
+                LogToFile($"\n--- CREATING DIMENSION CHAIN ---");
+                LogToFile($"Direction: ({direction.X:F3}, {direction.Y:F3}, {direction.Z:F3})");
+                LogToFile($"Items count: {items.Count}");
+
+                // Create reference array
                 ReferenceArray refArray = new ReferenceArray();
-                foreach (var item in items)
+                LogToFile($"Building reference array:");
+
+                for (int i = 0; i < items.Count; i++)
                 {
-                    // Use the appropriate reference based on settings and element type
-                    Reference reference = item.GetReference(_settings.ReferenceType);
-                    refArray.Append(reference);
+                    var item = items[i];
+                    try
+                    {
+                        LogToFile($"  Processing item {i + 1}: {item.ItemType} - {item.Element?.Name ?? "Unnamed"} (ID: {item.Element?.Id?.IntegerValue})");
+
+                        Reference reference = item.GetReference(_settings.ReferenceType);
+                        if (reference != null)
+                        {
+                            try
+                            {
+                                refArray.Append(reference);
+                                LogToFile($"    ✅ Reference added successfully");
+                            }
+                            catch (Exception refEx)
+                            {
+                                LogToFile($"    ❌ Error appending reference: {refEx.Message}");
+                            }
+                        }
+                        else
+                        {
+                            LogToFile($"    ❌ GetReference returned null");
+                        }
+                    }
+                    catch (Exception itemEx)
+                    {
+                        LogToFile($"    ❌ Error processing item: {itemEx.Message}");
+                    }
                 }
+
+                if (refArray.Size < 2)
+                {
+                    LogToFile($"❌ Insufficient valid references ({refArray.Size}) for dimension chain");
+                    return null;
+                }
+
+                LogToFile($"✅ Reference array built with {refArray.Size} references");
+
+                // Calculate dimension line position
+                LogToFile($"Calculating dimension line...");
 
                 XYZ perpDirection = new XYZ(-direction.Y, direction.X, 0);
                 if (perpDirection.GetLength() < 0.001)
@@ -1113,12 +1518,15 @@ namespace CustomRevitCommand
                 }
                 perpDirection = perpDirection.Normalize();
 
+                LogToFile($"Perpendicular direction: ({perpDirection.X:F3}, {perpDirection.Y:F3}, {perpDirection.Z:F3})");
+
                 XYZ groupCenter = XYZ.Zero;
                 foreach (var item in items)
                 {
                     groupCenter += item.ProjectedPoint;
                 }
                 groupCenter = groupCenter / items.Count;
+                LogToFile($"Group center: ({groupCenter.X:F3}, {groupCenter.Y:F3}, {groupCenter.Z:F3})");
 
                 XYZ dimLinePoint2D = groupCenter + perpDirection * DIMENSION_OFFSET;
                 XYZ dimLinePoint3D = ConvertViewPointTo3D(dimLinePoint2D, view);
@@ -1133,8 +1541,12 @@ namespace CustomRevitCommand
                     direction3D = direction3D.Normalize();
                 }
 
+                LogToFile($"Dimension line point 3D: ({dimLinePoint3D.X:F3}, {dimLinePoint3D.Y:F3}, {dimLinePoint3D.Z:F3})");
+                LogToFile($"Direction 3D: ({direction3D.X:F3}, {direction3D.Y:F3}, {direction3D.Z:F3})");
+
                 double minProj = items.Min(item => item.PositionAlongDirection);
                 double maxProj = items.Max(item => item.PositionAlongDirection);
+                LogToFile($"Projection range: {minProj:F3} to {maxProj:F3}");
 
                 double span = Math.Abs(maxProj - minProj);
                 if (span < 1.0)
@@ -1142,20 +1554,172 @@ namespace CustomRevitCommand
                     double center = (minProj + maxProj) / 2;
                     minProj = center - 0.5;
                     maxProj = center + 0.5;
+                    LogToFile($"Adjusted projection range: {minProj:F3} to {maxProj:F3}");
                 }
 
                 XYZ dimStart3D = dimLinePoint3D + direction3D * (minProj - 1.97);
                 XYZ dimEnd3D = dimLinePoint3D + direction3D * (maxProj + 1.97);
 
+                LogToFile($"Dimension start: ({dimStart3D.X:F3}, {dimStart3D.Y:F3}, {dimStart3D.Z:F3})");
+                LogToFile($"Dimension end: ({dimEnd3D.X:F3}, {dimEnd3D.Y:F3}, {dimEnd3D.Z:F3})");
+
+                // Validate dimension line
+                double dimLineLength = dimStart3D.DistanceTo(dimEnd3D);
+                LogToFile($"Dimension line length: {dimLineLength:F3}");
+
+                if (dimLineLength < 0.1) // Less than about 1 inch
+                {
+                    LogToFile($"❌ Dimension line too short: {dimLineLength:F3}");
+                    return null;
+                }
+
                 Line dimensionLine = Line.CreateBound(dimStart3D, dimEnd3D);
-                Dimension dimension = doc.Create.NewDimension(view, dimensionLine, refArray);
+                LogToFile($"✅ Dimension line created successfully");
+
+                // Additional validation
+                LogToFile($"View information:");
+                LogToFile($"  View name: {view.Name}");
+                LogToFile($"  View type: {view.ViewType}");
+                LogToFile($"  View is template: {view.IsTemplate}");
+                LogToFile($"  View scale: {view.Scale}");
+
+                // Check if view is locked or has issues
+                try
+                {
+                    var cropParam = view.get_Parameter(BuiltInParameter.VIEWER_CROP_REGION_VISIBLE);
+                    if (cropParam != null)
+                    {
+                        LogToFile($"  View crop region visible: {cropParam.AsInteger() == 1}");
+                    }
+                }
+                catch
+                {
+                    LogToFile($"  Could not check view crop status");
+                }
+
+                LogToFile($"Attempting to create dimension...");
+                LogToFile($"  Reference array size: {refArray.Size}");
+                LogToFile($"  Dimension line length: {dimensionLine.Length:F3}");
+
+                // Try to create the dimension
+                Dimension dimension = null;
+                try
+                {
+                    dimension = doc.Create.NewDimension(view, dimensionLine, refArray);
+
+                    if (dimension != null)
+                    {
+                        LogToFile($"✅ Dimension created successfully! ID: {dimension.Id.IntegerValue}");
+
+                        // Additional dimension info
+                        LogToFile($"  Dimension segments: {dimension.Segments.Size}");
+                        LogToFile($"  Dimension curve length: {dimension.Curve.Length:F3}");
+
+                        // Try to get dimension value
+                        try
+                        {
+                            string dimValue = dimension.ValueString;
+                            LogToFile($"  Dimension value: {dimValue}");
+                        }
+                        catch (Exception valueEx)
+                        {
+                            LogToFile($"  Could not get dimension value: {valueEx.Message}");
+                        }
+                    }
+                    else
+                    {
+                        LogToFile($"❌ doc.Create.NewDimension returned null - this usually means:");
+                        LogToFile($"  1. Invalid references (elements not dimensionable)");
+                        LogToFile($"  2. References are collinear with dimension line");
+                        LogToFile($"  3. View doesn't support dimensions");
+                        LogToFile($"  4. Transaction not active");
+                    }
+                }
+                catch (Autodesk.Revit.Exceptions.ArgumentException argEx)
+                {
+                    LogToFile($"❌ ArgumentException creating dimension: {argEx.Message}");
+                    LogToFile($"  This usually means invalid references or geometry");
+                }
+                catch (Autodesk.Revit.Exceptions.InvalidOperationException invOpEx)
+                {
+                    LogToFile($"❌ InvalidOperationException creating dimension: {invOpEx.Message}");
+                    LogToFile($"  This usually means transaction issues or view problems");
+                }
+                catch (Exception genEx)
+                {
+                    LogToFile($"❌ General exception creating dimension: {genEx.Message}");
+                    LogToFile($"  Exception type: {genEx.GetType().Name}");
+                    LogToFile($"  Stack trace: {genEx.StackTrace}");
+                }
 
                 return dimension;
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"Error creating dimension: {ex.Message}");
+                LogToFile($"❌ Error in CreateDimensionChain: {ex.Message}");
+                LogToFile($"Exception type: {ex.GetType().Name}");
+                LogToFile($"Stack trace: {ex.StackTrace}");
                 return null;
+            }
+        }
+
+        private void DebugProjectedItemReferences(List<ProjectedItem> items)
+        {
+            LogToFile($"\n--- DEBUGGING PROJECTED ITEM REFERENCES ---");
+
+            for (int i = 0; i < items.Count; i++)
+            {
+                var item = items[i];
+                LogToFile($"Item {i + 1}: {item.ItemType} - ID: {item.Element?.Id?.IntegerValue}");
+
+                try
+                {
+                    // Test getting different reference types
+                    var centerlineRef = item.CenterlineReference;
+                    var geometricRef = item.GeometricReference;
+                    var settingsRef = item.GetReference(_settings.ReferenceType);
+
+                    LogToFile($"  Centerline ref: {(centerlineRef != null ? "✅ Valid" : "❌ Null")}");
+                    LogToFile($"  Geometric ref: {(geometricRef != null ? "✅ Valid" : "❌ Null")}");
+                    LogToFile($"  Settings ref ({_settings.ReferenceType}): {(settingsRef != null ? "✅ Valid" : "❌ Null")}");
+
+                    // Test if element is valid for dimensioning
+                    if (item.Element != null)
+                    {
+                        LogToFile($"  Element valid: ✅");
+                        LogToFile($"  Element category: {item.Element.Category?.Name ?? "No Category"}");
+
+                        // For curtain grid lines, try to get additional info
+                        if (item.Element is CurtainGridLine gridLine)
+                        {
+                            LogToFile($"  CurtainGridLine details:");
+                            try
+                            {
+                                var curve = gridLine.FullCurve;
+                                LogToFile($"    Has curve: {(curve != null ? "✅" : "❌")}");
+                                if (curve != null)
+                                {
+                                    LogToFile($"    Curve type: {curve.GetType().Name}");
+                                    LogToFile($"    Curve length: {curve.Length:F3}");
+                                }
+                            }
+                            catch (Exception curveEx)
+                            {
+                                LogToFile($"    Error getting curve: {curveEx.Message}");
+                            }
+                        }
+                    }
+                    else
+                    {
+                        LogToFile($"  Element: ❌ Null");
+                    }
+                }
+                catch (Exception refEx)
+                {
+                    LogToFile($"  Error checking references: {refEx.Message}");
+                }
+
+                LogToFile($""); // Empty line for readability
             }
         }
 

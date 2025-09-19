@@ -53,12 +53,12 @@ namespace CustomRevitCommand
         private void InitializeComponent()
         {
             Title = "Auto-Dimension Settings";
-            Height = 600;
-            Width = 450;
+            Height = 650; // Increased height for new content
+            Width = 480;  // Increased width for better layout
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
             ResizeMode = ResizeMode.CanResize;
-            MinHeight = 500;
-            MinWidth = 400;
+            MinHeight = 550;
+            MinWidth = 450;
 
             var mainGrid = new WpfGrid();
             mainGrid.Margin = new Thickness(10);
@@ -107,7 +107,7 @@ namespace CustomRevitCommand
             // Element Inclusion Section
             panel.Children.Add(CreateSectionHeader("Element Inclusion"));
 
-            _includeGridsCheckBox = CreateCheckBox("Include Grids", "Automatically include grid lines in dimensioning");
+            _includeGridsCheckBox = CreateCheckBox("Include Grids", "Automatically include building grid lines in dimensioning");
             panel.Children.Add(_includeGridsCheckBox);
 
             _includeLevelsCheckBox = CreateCheckBox("Include Levels", "Automatically include levels in section/elevation views");
@@ -116,34 +116,82 @@ namespace CustomRevitCommand
             _includeStructuralCheckBox = CreateCheckBox("Include Structural Elements", "Include beams, columns, structural walls");
             panel.Children.Add(_includeStructuralCheckBox);
 
-            _includeCurtainWallsCheckBox = CreateCheckBox("Include Curtain Walls", "Include curtain wall panels and systems");
+            // Enhanced Curtain Wall Section with better labeling
+            panel.Children.Add(CreateSectionHeader("Curtain Wall Elements"));
+
+            _includeCurtainWallsCheckBox = CreateCheckBox("Include Curtain Walls", "Include curtain wall panels and systems (wall centerline/faces)");
             panel.Children.Add(_includeCurtainWallsCheckBox);
 
-            _includeMullionsCheckBox = CreateCheckBox("Include Curtain Wall Grid Lines", "Include curtain wall grid lines for precise dimensioning");
+            _includeMullionsCheckBox = CreateCheckBox("Include Curtain Wall Mullions", "Include actual mullion elements (not grid lines)");
             panel.Children.Add(_includeMullionsCheckBox);
 
-            // Reference Type Section
-            panel.Children.Add(CreateSectionHeader("Dimension Reference"));
+            // Updated explanation text for curtain wall elements
+            var curtainWallExplanation = new TextBlock
+            {
+                Text = "Note: Curtain Wall Grid Lines are not directly dimensionable in Revit.\n" +
+                       "The tool dimensions to curtain walls and actual mullions instead.\n" +
+                       "For precise curtain wall grid dimensioning, use the Dimension Chain tool.",
+                FontSize = 10,
+                Foreground = Brushes.DarkOrange,
+                Margin = new Thickness(15, 5, 0, 15),
+                TextWrapping = TextWrapping.Wrap,
+                FontStyle = FontStyles.Italic
+            };
+            panel.Children.Add(curtainWallExplanation);
+
+            // ENHANCED Reference Type Section
+            panel.Children.Add(CreateSectionHeader("Dimension Reference (Face Selection)"));
 
             var referencePanel = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 5, 0, 10) };
-            referencePanel.Children.Add(new TextBlock { Text = "Reference Type:", VerticalAlignment = VerticalAlignment.Center, Width = 120 });
+            referencePanel.Children.Add(new TextBlock
+            {
+                Text = "Dimension To:",
+                VerticalAlignment = VerticalAlignment.Center,
+                Width = 120,
+                FontWeight = FontWeights.Bold
+            });
 
-            _referenceTypeComboBox = new ComboBox { Width = 150, Margin = new Thickness(10, 0, 0, 0) };
-            _referenceTypeComboBox.Items.Add(new ComboBoxItem { Content = "Centerline", Tag = DimensionReferenceType.Centerline });
-            _referenceTypeComboBox.Items.Add(new ComboBoxItem { Content = "Exterior Face", Tag = DimensionReferenceType.ExteriorFace });
-            _referenceTypeComboBox.Items.Add(new ComboBoxItem { Content = "Interior Face", Tag = DimensionReferenceType.InteriorFace });
-            _referenceTypeComboBox.Items.Add(new ComboBoxItem { Content = "Auto (Recommended)", Tag = DimensionReferenceType.Auto });
+            _referenceTypeComboBox = new ComboBox { Width = 200, Margin = new Thickness(10, 0, 0, 0) };
+            _referenceTypeComboBox.Items.Add(new ComboBoxItem
+            {
+                Content = "Centerline (Default)",
+                Tag = DimensionReferenceType.Centerline
+            });
+            _referenceTypeComboBox.Items.Add(new ComboBoxItem
+            {
+                Content = "Exterior Face",
+                Tag = DimensionReferenceType.ExteriorFace
+            });
+            _referenceTypeComboBox.Items.Add(new ComboBoxItem
+            {
+                Content = "Interior Face",
+                Tag = DimensionReferenceType.InteriorFace
+            });
+            _referenceTypeComboBox.Items.Add(new ComboBoxItem
+            {
+                Content = "Auto (Smart Selection)",
+                Tag = DimensionReferenceType.Auto
+            });
+
+            // Add event handler for selection change
+            _referenceTypeComboBox.SelectionChanged += ReferenceTypeComboBox_SelectionChanged;
+
             referencePanel.Children.Add(_referenceTypeComboBox);
             panel.Children.Add(referencePanel);
 
-            // Add explanation for reference types
+            // Enhanced explanation with visual examples
             var explanationText = new TextBlock
             {
-                Text = "• Centerline: Dimension to element centerlines\n" +
-                       "• Exterior Face: Dimension to outer face of walls/elements\n" +
-                       "• Interior Face: Dimension to inner face of walls/elements\n" +
-                       "• Auto: System chooses best reference based on element type\n\n" +
-                       "Note: Curtain wall grid lines always use centerline reference",
+                Text = "Choose which part of walls and elements to dimension to:\n\n" +
+                       "• Centerline: Dimensions to element centerlines (traditional method)\n" +
+                       "  └─ Best for: Grids, levels, structural layouts\n\n" +
+                       "• Exterior Face: Dimensions to outer face of walls\n" +
+                       "  └─ Best for: Building exterior, site planning\n\n" +
+                       "• Interior Face: Dimensions to inner face of walls\n" +
+                       "  └─ Best for: Interior space planning, room layouts\n\n" +
+                       "• Auto: System chooses best reference per element type\n" +
+                       "  └─ Grids/Levels→Centerline, Walls→Exterior Face\n\n" +
+                       "Note: Grids and levels always use their inherent centerline reference.",
                 FontSize = 10,
                 Foreground = Brushes.Gray,
                 Margin = new Thickness(0, 0, 0, 15),
@@ -158,11 +206,25 @@ namespace CustomRevitCommand
             _collinearityToleranceTextBox = CreateLabeledTextBox(panel, "Collinearity Tolerance (feet):", "How close elements must be to be considered on same line");
             _perpendicularToleranceTextBox = CreateLabeledTextBox(panel, "Perpendicular Tolerance:", "Tolerance for detecting perpendicular elements");
 
-            // Advanced Tolerances
+            // Advanced Tolerances with enhanced descriptions
             panel.Children.Add(CreateSectionHeader("Advanced Tolerances"));
-            _structuralToleranceTextBox = CreateLabeledTextBox(panel, "Structural Elements (feet):", "Relaxed tolerance for structural elements");
-            _gridToleranceTextBox = CreateLabeledTextBox(panel, "Grid Lines (feet):", "Tight tolerance for grid alignment");
-            _curtainWallToleranceTextBox = CreateLabeledTextBox(panel, "Curtain Wall Grid (feet):", "Tolerance for curtain wall grid line alignment");
+            _structuralToleranceTextBox = CreateLabeledTextBox(panel, "Structural Elements (feet):", "Relaxed tolerance for structural elements (typically 0.05)");
+            _gridToleranceTextBox = CreateLabeledTextBox(panel, "Grid Lines (feet):", "Tight tolerance for grid alignment (typically 0.005)");
+            _curtainWallToleranceTextBox = CreateLabeledTextBox(panel, "Curtain Wall Elements (feet):", "Tolerance for curtain wall element alignment (typically 0.008)");
+
+            // Add tolerance explanation
+            var toleranceExplanation = new TextBlock
+            {
+                Text = "Smaller tolerance values = stricter alignment requirements\n" +
+                       "Larger tolerance values = more flexible grouping of elements\n" +
+                       "Curtain wall elements typically need tighter tolerances than structural elements",
+                FontSize = 10,
+                Foreground = Brushes.DarkGreen,
+                Margin = new Thickness(0, 5, 0, 15),
+                TextWrapping = TextWrapping.Wrap,
+                FontStyle = FontStyles.Italic
+            };
+            panel.Children.Add(toleranceExplanation);
 
             // Behavior Section
             panel.Children.Add(CreateSectionHeader("Behavior"));
@@ -373,6 +435,17 @@ namespace CustomRevitCommand
             {
                 MessageBox.Show($"Error saving settings: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
                 return false;
+            }
+        }
+
+        // ADD this new event handler method:
+        private void ReferenceTypeComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            var selectedItem = _referenceTypeComboBox.SelectedItem as ComboBoxItem;
+            if (selectedItem != null)
+            {
+                var referenceType = (DimensionReferenceType)selectedItem.Tag;
+                System.Diagnostics.Debug.WriteLine($"Reference type changed to: {referenceType}");
             }
         }
 

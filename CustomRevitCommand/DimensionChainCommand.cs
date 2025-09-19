@@ -9,16 +9,7 @@ using Autodesk.Revit.UI.Selection;
 namespace CustomRevitCommand
 {
     /// <summary>
-    /// Continuous Dimension Chain Command
-    /// Simple and reliable approach using point picking with temporary line visualization
-    /// Continuous mode - draw multiple chains until ESC pressed
-    /// 
-    /// Workflow:
-    /// 1. Pick start point
-    /// 2. Pick end point with rubber band effect using ISelectionFilter
-    /// 3. Create temporary visible line
-    /// 4. Analyze and replace with dimension chain
-    /// 5. Repeat until ESC pressed
+    /// Continuous Dimension Chain Command - Restored Working Version
     /// </summary>
     [Transaction(TransactionMode.Manual)]
     public class DimensionChainCommand : IExternalCommand
@@ -29,6 +20,7 @@ namespace CustomRevitCommand
         private UIDocument _uidoc;
         private UIApplication _uiapp;
         private int _chainCount = 0;
+        private DimensionSettings _settings;
         #endregion
 
         public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
@@ -40,6 +32,9 @@ namespace CustomRevitCommand
 
             try
             {
+                // Load settings (minimal change - don't use them in complex ways yet)
+                _settings = DimensionSettings.LoadFromProject(_doc);
+
                 if (!IsValidViewType(_activeView))
                 {
                     message = "This command only works in plan, section, or elevation views.";
@@ -70,18 +65,16 @@ namespace CustomRevitCommand
                         _chainCount++;
                         System.Diagnostics.Debug.WriteLine($"--- Starting chain #{_chainCount} ---");
 
-                        // Create dimension chain with comprehensive approach
+                        // Create dimension chain
                         var result = CreateSingleDimensionChain();
 
                         if (result == Result.Cancelled)
                         {
-                            // User pressed ESC - exit continuous mode
                             System.Diagnostics.Debug.WriteLine("User cancelled - exiting continuous mode");
                             break;
                         }
                         else if (result == Result.Failed)
                         {
-                            // Error occurred, but continue
                             System.Diagnostics.Debug.WriteLine($"Chain #{_chainCount} failed, continuing...");
                             continue;
                         }
@@ -90,14 +83,12 @@ namespace CustomRevitCommand
                     }
                     catch (Autodesk.Revit.Exceptions.OperationCanceledException)
                     {
-                        // User pressed ESC - exit continuous mode
                         System.Diagnostics.Debug.WriteLine("Operation cancelled by user - exiting");
                         break;
                     }
                     catch (Exception ex)
                     {
                         System.Diagnostics.Debug.WriteLine($"Error in chain #{_chainCount}: {ex.Message}");
-                        // Continue to next chain
                         continue;
                     }
                 }
@@ -119,40 +110,32 @@ namespace CustomRevitCommand
 
             try
             {
-                System.Diagnostics.Debug.WriteLine("Phase 1: Getting points from user...");
-
-                // PHASE 1: Get two points from user with visual feedback
+                // Get two points from user
                 var points = GetTwoPointsFromUser();
                 if (points == null)
                 {
-                    return Result.Cancelled; // User cancelled
+                    return Result.Cancelled;
                 }
 
                 var startPoint = points.Item1;
                 var endPoint = points.Item2;
 
-                System.Diagnostics.Debug.WriteLine($"Points selected: {startPoint} to {endPoint}");
-
-                // PHASE 2: Create temporary visible line for user feedback
-                System.Diagnostics.Debug.WriteLine("Phase 2: Creating temporary line...");
+                // Create temporary line for feedback
                 tempLine = CreateTemporaryLine(startPoint, endPoint);
 
-                // PHASE 3: Analyze line and create dimension chain
-                System.Diagnostics.Debug.WriteLine("Phase 3: Analyzing and creating dimension chain...");
+                // Analyze and create dimension chain
                 var result = AnalyzeAndCreateDimensionChain(startPoint, endPoint, tempLine);
 
                 return result;
             }
             catch (Autodesk.Revit.Exceptions.OperationCanceledException)
             {
-                // Clean up temporary line if user cancels
                 CleanupTemporaryLine(tempLine);
                 return Result.Cancelled;
             }
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"Error creating dimension chain: {ex.Message}");
-                // Clean up temporary line on error
                 CleanupTemporaryLine(tempLine);
                 return Result.Failed;
             }
@@ -162,19 +145,12 @@ namespace CustomRevitCommand
         {
             try
             {
-                // Pick start point
-                System.Diagnostics.Debug.WriteLine("Prompting for start point...");
                 var startPoint = _uidoc.Selection.PickPoint($"Chain #{_chainCount}: Pick start point");
-
-                // Pick end point
-                System.Diagnostics.Debug.WriteLine("Prompting for end point...");
                 var endPoint = _uidoc.Selection.PickPoint($"Chain #{_chainCount}: Pick end point");
-
                 return new Tuple<XYZ, XYZ>(startPoint, endPoint);
             }
             catch (Autodesk.Revit.Exceptions.OperationCanceledException)
             {
-                System.Diagnostics.Debug.WriteLine("User cancelled point selection");
                 return null;
             }
         }
@@ -192,13 +168,10 @@ namespace CustomRevitCommand
 
                     if (detailLine != null)
                     {
-                        // Make line visible with bright red color and thick weight
                         var overrides = new OverrideGraphicSettings();
-                        overrides.SetProjectionLineColor(new Color(255, 0, 0)); // Bright red
-                        overrides.SetProjectionLineWeight(8); // Thick line
+                        overrides.SetProjectionLineColor(new Color(255, 0, 0));
+                        overrides.SetProjectionLineWeight(8);
                         _activeView.SetElementOverrides(detailLine.Id, overrides);
-
-                        System.Diagnostics.Debug.WriteLine($"Temporary line created with ID: {detailLine.Id}");
                     }
 
                     trans.Commit();
@@ -223,7 +196,6 @@ namespace CustomRevitCommand
                     trans.Start();
                     _doc.Delete(tempLine.Id);
                     trans.Commit();
-                    System.Diagnostics.Debug.WriteLine($"Cleaned up temporary line: {tempLine.Id}");
                 }
             }
             catch (Exception ex)
@@ -236,28 +208,16 @@ namespace CustomRevitCommand
         {
             try
             {
-                // Determine dimension direction
                 var dimensionDirection = DetermineDimensionDirection(startPoint, endPoint);
-                System.Diagnostics.Debug.WriteLine($"Dimension direction: {dimensionDirection}");
-
-                // Find intersected elements along the line
                 var intersectedElements = FindElementsIntersectedByLine(startPoint, endPoint);
-                System.Diagnostics.Debug.WriteLine($"Found {intersectedElements.Count} intersected elements");
-
-                // Filter for suitable elements
                 var filteredElements = FilterPerpendicularElements(intersectedElements, dimensionDirection);
-                System.Diagnostics.Debug.WriteLine($"Filtered to {filteredElements.Count} suitable elements");
 
                 if (filteredElements.Count < 2)
                 {
-                    System.Diagnostics.Debug.WriteLine($"Not enough elements ({filteredElements.Count}) for dimensioning");
-
-                    // Not enough elements - keep the temporary line as a regular detail line
-                    // User can see what they drew
+                    // Not enough elements - keep the temporary line
                     return Result.Succeeded;
                 }
 
-                // Create dimension chain and remove temporary line
                 return CreateDimensionChainAndCleanup(filteredElements, dimensionDirection, startPoint, endPoint, tempLine);
             }
             catch (Exception ex)
@@ -276,37 +236,33 @@ namespace CustomRevitCommand
 
                 try
                 {
-                    // Create reference array
+                    // Create reference array - simple approach
                     var refArray = new ReferenceArray();
                     foreach (var element in elements)
                     {
-                        refArray.Append(element.Reference);
+                        var reference = GetBestReferenceForElement(element.Element);
+                        refArray.Append(reference);
                     }
 
-                    // Calculate dimension line position
+                    // Calculate dimension line
                     var dimensionLine = CalculateDimensionLine(elements, dimensionDirection, startPoint, endPoint);
 
-                    // Create dimension chain
+                    // Create dimension
                     var dimension = _doc.Create.NewDimension(_activeView, dimensionLine, refArray);
 
                     if (dimension != null)
                     {
-                        // Success - remove temporary line and keep dimension
+                        // Success - remove temporary line
                         if (tempLine != null)
                         {
                             _doc.Delete(tempLine.Id);
-                            System.Diagnostics.Debug.WriteLine("Temporary line replaced with dimension chain");
                         }
-
                         trans.Commit();
-                        System.Diagnostics.Debug.WriteLine($"Chain #{_chainCount} created with {elements.Count} elements");
                         return Result.Succeeded;
                     }
                     else
                     {
-                        // Failed to create dimension - keep temporary line
                         trans.RollBack();
-                        System.Diagnostics.Debug.WriteLine("Failed to create dimension - keeping temporary line");
                         return Result.Failed;
                     }
                 }
@@ -349,8 +305,6 @@ namespace CustomRevitCommand
                 var lineStart2D = ProjectPointToView(startPoint);
                 var lineEnd2D = ProjectPointToView(endPoint);
 
-                System.Diagnostics.Debug.WriteLine($"Checking intersection with {allElements.Count} elements");
-
                 foreach (var element in allElements)
                 {
                     if (DoesElementIntersectLine(element, lineStart2D, lineEnd2D))
@@ -359,7 +313,6 @@ namespace CustomRevitCommand
                         if (candidate != null && candidate.IsValid)
                         {
                             intersectedElements.Add(candidate);
-                            System.Diagnostics.Debug.WriteLine($"Added element: {element.Category?.Name} - {element.Id}");
                         }
                     }
                 }
@@ -391,8 +344,6 @@ namespace CustomRevitCommand
                 filteredElements.Sort((a, b) =>
                     a.CenterPoint.DotProduct(dimensionDirection).CompareTo(
                     b.CenterPoint.DotProduct(dimensionDirection)));
-
-                System.Diagnostics.Debug.WriteLine($"After filtering: {filteredElements.Count} perpendicular elements");
             }
             catch (Exception ex)
             {
@@ -505,15 +456,13 @@ namespace CustomRevitCommand
 
                     if (isHorizontalDimension)
                     {
-                        // For horizontal dimensions, keep vertical elements
                         var dotProduct = Math.Abs(elementDirection2D.DotProduct(new XYZ(1, 0, 0)));
-                        return dotProduct < 0.5; // Less than 60 degrees from vertical
+                        return dotProduct < 0.5;
                     }
                     else
                     {
-                        // For vertical dimensions, keep horizontal elements
                         var dotProduct = Math.Abs(elementDirection2D.DotProduct(new XYZ(0, 1, 0)));
-                        return dotProduct < 0.5; // Less than 60 degrees from horizontal
+                        return dotProduct < 0.5;
                     }
                 }
 
@@ -598,15 +547,12 @@ namespace CustomRevitCommand
 
             try
             {
-                // Get elements visible in current view
                 var viewCollector = new FilteredElementCollector(_doc, _activeView.Id);
                 var viewElements = viewCollector.ToElements();
 
-                // Get all grids and levels (they might not be in view filter)
                 var gridCollector = new FilteredElementCollector(_doc).OfClass(typeof(Grid));
                 var levelCollector = new FilteredElementCollector(_doc).OfClass(typeof(Level));
 
-                // Combine all elements and remove duplicates
                 var allElements = viewElements
                     .Concat(gridCollector.ToElements())
                     .Concat(levelCollector.ToElements())
@@ -620,8 +566,6 @@ namespace CustomRevitCommand
                         elements.Add(element);
                     }
                 }
-
-                System.Diagnostics.Debug.WriteLine($"Found {elements.Count} dimensionable elements");
             }
             catch (Exception ex)
             {
@@ -635,11 +579,9 @@ namespace CustomRevitCommand
         {
             if (element == null || element.Category == null) return false;
 
-            // Must have location curve or be grid/level
             if (!(element.Location is LocationCurve) && !(element is Grid) && !(element is Level))
                 return false;
 
-            // Exclude certain categories
             string categoryName = element.Category.Name.ToLower();
             if (categoryName.Contains("fitting") ||
                 categoryName.Contains("accessory") ||
@@ -664,7 +606,6 @@ namespace CustomRevitCommand
                     IsValid = true
                 };
 
-                // Validate the reference
                 if (candidate.Reference == null)
                 {
                     candidate.IsValid = false;

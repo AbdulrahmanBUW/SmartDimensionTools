@@ -241,6 +241,23 @@ namespace CustomRevitCommand
             string catName = element.Category.Name.ToLower();
             return catName.Contains("curtain") || catName.Contains("mullion") || catName.Contains("panel");
         }
+
+        public static string GetReferenceTypeDescription(DimensionReferenceType referenceType)
+        {
+            switch (referenceType)
+            {
+                case DimensionReferenceType.Centerline:
+                    return "Centerline - Dimensions to element centerlines (default for grids, levels)";
+                case DimensionReferenceType.ExteriorFace:
+                    return "Exterior Face - Dimensions to outer face of walls and elements";
+                case DimensionReferenceType.InteriorFace:
+                    return "Interior Face - Dimensions to inner face of walls and elements";
+                case DimensionReferenceType.Auto:
+                    return "Auto - System chooses best reference based on element type";
+                default:
+                    return "Unknown reference type";
+            }
+        }
     }
 
     public enum DimensionReferenceType
