@@ -21,7 +21,7 @@ namespace CustomRevitCommand
         private DimensionSettings _settings;
         private double PARALLEL_TOLERANCE => 0.05; // ~3 degrees for 2D
         private double PERPENDICULAR_TOLERANCE => _settings?.PerpendicularTolerance ?? 0.1;
-        private double DIMENSION_OFFSET => _settings?.DefaultOffset ?? 1.64; // feet
+        private double DIMENSION_OFFSET => _settings?.DefaultOffset ?? 1.64;
         private string _logFilePath;
 
         public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
@@ -408,7 +408,7 @@ namespace CustomRevitCommand
                     LogToFile($"\n--- MOVING DIMENSIONS ---");
                     try
                     {
-                        MoveDimensionsLeft(doc, createdDimensions, 0.0328084); // 10mm in feet
+                        MoveDimensionsLeft(doc, createdDimensions, 0.0328084);
                         LogToFile($"✅ Moved {createdDimensions.Count} dimensions");
                     }
                     catch (Exception ex)

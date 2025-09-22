@@ -40,7 +40,7 @@ namespace CustomRevitCommand
                     settingsInfo += $"• Include Structural: {(newSettings.IncludeStructural ? "Yes" : "No")}\n";
                     settingsInfo += $"• Include Curtain Walls: {(newSettings.IncludeCurtainWalls ? "Yes" : "No")}\n";
                     settingsInfo += $"• Include Curtain Wall Grids: {(newSettings.IncludeMullions ? "Yes" : "No")}\n";
-                    settingsInfo += $"• Default Offset: {newSettings.DefaultOffset:F2} feet\n\n";
+                    settingsInfo += $"• Default Offset: {newSettings.DefaultOffset:F2} m\n\n";
 
                     // Add reference type explanation
                     switch (newSettings.ReferenceType)

@@ -202,15 +202,15 @@ namespace CustomRevitCommand
             // Tolerances Section
             panel.Children.Add(CreateSectionHeader("Tolerances & Spacing"));
 
-            _defaultOffsetTextBox = CreateLabeledTextBox(panel, "Default Offset (feet):", "Distance from elements to dimension line");
-            _collinearityToleranceTextBox = CreateLabeledTextBox(panel, "Collinearity Tolerance (feet):", "How close elements must be to be considered on same line");
+            _defaultOffsetTextBox = CreateLabeledTextBox(panel, "Default Offset (m):", "Distance from elements to dimension line");
+            _collinearityToleranceTextBox = CreateLabeledTextBox(panel, "Collinearity Tolerance (m):", "How close elements must be to be considered on same line");
             _perpendicularToleranceTextBox = CreateLabeledTextBox(panel, "Perpendicular Tolerance:", "Tolerance for detecting perpendicular elements");
 
             // Advanced Tolerances with enhanced descriptions
             panel.Children.Add(CreateSectionHeader("Advanced Tolerances"));
-            _structuralToleranceTextBox = CreateLabeledTextBox(panel, "Structural Elements (feet):", "Relaxed tolerance for structural elements (typically 0.05)");
-            _gridToleranceTextBox = CreateLabeledTextBox(panel, "Grid Lines (feet):", "Tight tolerance for grid alignment (typically 0.005)");
-            _curtainWallToleranceTextBox = CreateLabeledTextBox(panel, "Curtain Wall Elements (feet):", "Tolerance for curtain wall element alignment (typically 0.008)");
+            _structuralToleranceTextBox = CreateLabeledTextBox(panel, "Structural Elements (m):", "Relaxed tolerance for structural elements (typically 0.05)");
+            _gridToleranceTextBox = CreateLabeledTextBox(panel, "Grid Lines (m):", "Tight tolerance for grid alignment (typically 0.005)");
+            _curtainWallToleranceTextBox = CreateLabeledTextBox(panel, "Curtain Wall Elements (m):", "Tolerance for curtain wall element alignment (typically 0.008)");
 
             // Add tolerance explanation
             var toleranceExplanation = new TextBlock

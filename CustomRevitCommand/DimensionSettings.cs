@@ -8,7 +8,7 @@ namespace CustomRevitCommand
     [Serializable]
     public class DimensionSettings
     {
-        public double DefaultOffset { get; set; } = 1.64; // feet
+        public double DefaultOffset { get; set; } = 1.64;
         public bool IncludeGrids { get; set; } = true;
         public bool IncludeLevels { get; set; } = true;
         public bool IncludeStructural { get; set; } = true;
